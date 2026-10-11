@@ -1,0 +1,45 @@
+{
+  "items": {
+    "illwill": {
+      "dir": "$deps/illwill",
+      "url": "https://github.com/johnnovak/illwill",
+      "commit": "99a120f7f69868b94f5d35ce7e21dd12535de70c",
+      "version": ""
+    },
+    "owlkettle": {
+      "dir": "$deps/owlkettle",
+      "url": "https://github.com/can-lehmann/owlkettle",
+      "commit": "edc5256390eb97d77b829439aece0cbf5d629255",
+      "version": ""
+    }
+  },
+  "nimcfg": [
+    "############# begin Atlas config section ##########",
+    "--noNimblePath",
+    "--path:\"deps/illwill\"",
+    "--path:\"deps/owlkettle\"",
+    "############# end Atlas config section   ##########",
+    ""
+  ],
+  "nimbleFile": {
+    "filename": "bsdinfo.nimble",
+    "content": [
+      "version = \"0.1.0\"",
+      "author = \"Michael Krauss\"",
+      "description = \"FreeBSD system information tool (CPU-X style) with GUI and TUI frontends\"",
+      "license = \"MIT\"",
+      "srcDir = \"src\"",
+      "bin = @[\"bsdinfo\"]",
+      "",
+      "requires \"nim >= 2.0.0\"",
+      "requires \"illwill >= 0.4.0\"",
+      "requires \"owlkettle >= 3.1.0\"",
+      ""
+    ]
+  },
+  "hostOS": "freebsd",
+  "hostCPU": "amd64",
+  "nimVersion": "2.2.12",
+  "gccVersion": "",
+  "clangVersion": ""
+}

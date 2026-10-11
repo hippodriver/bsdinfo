@@ -1,0 +1,12 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=bsdinfo
+GenericName=System Information
+Comment=View CPU, GPU, memory and disk information
+Exec=bsdinfo
+Terminal=false
+Icon=utilities-system-monitor
+Categories=System;Monitor;
+Keywords=system;hardware;cpu;memory;disk;gpu;freebsd;
+StartupNotify=false

@@ -1,0 +1,8 @@
+deps/
+nim.cfg
+*.o
+/bsdinfo
+*.core
+.crush/
+tests/test_*
+!tests/test_*.nim

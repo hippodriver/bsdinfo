@@ -1,0 +1,12 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=bsdinfo (Terminal)
+GenericName=System Information
+Comment=View CPU, GPU, memory and disk information in a terminal
+Exec=bsdinfo --tui
+Terminal=true
+Icon=utilities-terminal
+Categories=System;Monitor;
+Keywords=system;hardware;cpu;memory;disk;gpu;freebsd;terminal;
+StartupNotify=false
