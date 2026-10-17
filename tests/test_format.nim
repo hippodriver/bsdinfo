@@ -26,3 +26,17 @@ suite "formatPercent":
     check formatPercent(0.0) == "0.0%"
     check formatPercent(42.3) == "42.3%"
     check formatPercent(100.0) == "100.0%"
+
+suite "formatRate":
+  test "zero and fractional rates":
+    check formatRate(0.0) == "0 B/s"
+    check formatRate(1536.0) == "1.5 KiB/s"
+
+suite "formatLinkSpeed":
+  test "zero is unknown":
+    check formatLinkSpeed(0) == "n/a"
+
+  test "scales to decimal units":
+    check formatLinkSpeed(100'u64) == "100 bit/s"
+    check formatLinkSpeed(1_000'u64) == "1.0 kbit/s"
+    check formatLinkSpeed(1_000_000_000'u64) == "1.0 Gbit/s"

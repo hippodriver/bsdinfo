@@ -74,6 +74,7 @@ owlkettle notes: needs `gtk4`, `cairo`, and `pkg-config` at compile time; does
 | CPU count | `hw.ncpu` |
 | CPU base/boost clock | `hw.clockrate`, `machdep.tsc_freq` |
 | CPU per-core freq | `dev.cpu.N.freq` (N = 0..ncpu-1) |
+| CPU per-core load | `kern.cp_times` delta between samples |
 | Total/real memory | `hw.physmem`, `hw.realmem`, `hw.pagesize` |
 | Memory in use/free | `vm.stats.vm.v_{active,inactive,wire,free,cache,page}_count` * pagesize |
 | OS name/release/version | `kern.ostype`, `kern.osrelease`, `kern.version` |
@@ -81,6 +82,11 @@ owlkettle notes: needs `gtk4`, `cairo`, and `pkg-config` at compile time; does
 | GPU | `pciconf -lv` VGA/display class entries (vendor + device strings) |
 | Disk devices | `geom disk list` (name, mediasize, descr) |
 | Disk space | `getfsstat(2)` per mounted filesystem (total/used/avail) |
+| Network interfaces, IPs, MAC | `getifaddrs(2)` |
+| Interface throughput / speed | `struct if_data` in the `AF_LINK` `ifa_data`, delta between samples |
+| Name servers / search domains | `/etc/resolv.conf` |
+| Default gateway | `route -n get default` |
+| Wireless networks | `ifconfig <wlan> list scan` (cached results, no root) |
 
 ## Module layout (one responsibility per module, narrow exports)
 
@@ -97,11 +103,14 @@ bsdinfo/
       sysctl.nim           # raw libc sysctl / sysctlbyname FFI
       sysctlread.nim       # typed helpers: sysctlStr / sysctlInt / sysctlU64
       statfs.nim           # raw getfsstat / struct statfs FFI
+      ifaddrs.nim          # raw getifaddrs / struct if_data FFI
+      amdgpu_drm.nim       # raw DRM_IOCTL_AMDGPU_INFO FFI
       cpu.nim              # CpuInfo + collectCpu
       memory.nim           # MemoryInfo + collectMemory
       osinfo.nim           # OsInfo + collectOs
       disk.nim             # DiskInfo + collectDisks (geom + getfsstat)
       gpu.nim              # GpuInfo + collectGpus (pciconf)
+      net.nim              # NetworkInfo + collectNetwork (getifaddrs, route, ifconfig)
       systeminfo.nim       # SystemInfo aggregate + collectSystem
       format.nim           # human-readable bytes / MHz / percent formatting
       gui.nim              # owlkettle app: renders SystemInfo (primary UI)
@@ -184,6 +193,277 @@ Each milestone ends with a compile + test run.
 - [x] 12. Polish. `README.md`, `LICENSE` (MIT), and `atlas.lock` (pins
   illwill @ 99a120f7 and owlkettle @ edc52563). Full suite passes (51 tests)
   and the release build succeeds; project diagnostics are clean.
+- [x] 13. CPU load and frequency detail. `sysctlread.nim` gains `sysctlRaw`;
+  `cpu.nim` adds a per-core `CpuCore` model, `CpuLoadSampler`, `kern.cp_times`
+  decoding (`sampleCpuTimes`, `coreLoadPercent`, `sampleLoad`), and replaces
+  `coreFrequenciesMhz` with `cores`; `collectCpu`/`collectSystem` take the
+  sampler. The GUI lists the cores two per row (left half then right half) and
+  the TUI does the same, both under a header row labelling the core, frequency
+  and load columns; the frequency is a numeric readout and the load is a bar plus
+  percentage. Full suite passes (60 tests).
+- [x] 14. GUI tabs. The owlkettle dashboard splits into a `System` tab
+  (operating system, CPU, memory, graphics) and a `Storage` tab (filesystems,
+  storage devices), selected by a linked `ToggleButton` strip above a shared
+  `ScrolledWindow`. owlkettle ships no notebook/stack widget, so the tab state
+  is a plain `int` on `AppState` and each toggle sets it.
+- [x] 15. Network tab. `ifaddrs.nim` binds `getifaddrs` / `struct if_data`;
+  `net.nim` adds `NetworkInfo`, `collectNetwork`, the `NetLoadSampler` throughput
+  sampler and the `parseResolvConf` / `parseRouteGetDefault` / `parseIfconfigScan`
+  parsers. The GUI gains a `Network` tab (interfaces, gateway and name servers,
+  rx/tx bars with a cairo sparkline, wireless); the TUI gains a `Network`
+  section and becomes scrollable. Covered by `tests/test_net.nim`. Full suite
+  passes (80 tests).
+- [x] 16. GPU details. `amdgpu_drm.nim` binds `DRM_IOCTL_AMDGPU_INFO`; `gpu.nim`
+  adds `GpuMetrics` (load, VRAM used/total, temperature, power, clocks) and
+  `GpuDriverInfo` (driver version, vbios, SMC firmware, power state), collected
+  from `sys.device.drmnN.*` and the DRM render node, with `parseAmdgpuVersion`
+  and `parseCurrentClock` parsers. The Graphics panel shows load and memory bars
+  plus a sensor line; fan speed reads `n/a`. Covered by `tests/test_gpu.nim`.
+  Full suite passes (96 tests).
+- [ ] 16. GPU details (planned, see "GPU details" below). Per-GPU load, VRAM
+  usage, driver/firmware info and fan speed.
+
+
+## CPU load and frequency detail
+
+Status: implemented. `src/bsdinfo/cpu.nim` exposes `CpuCore`, `CpuLoadSampler`,
+`sampleCpuTimes`, `coreLoadPercent` and `sampleLoad`; `sysctlread.nim` gained
+`sysctlRaw`. Both frontends list the cores as rows under a header row labelling
+the core, frequency and load columns; the frequency is a numeric readout and the
+load is a bar plus percentage. Covered by `tests/test_cpu.nim` (13 tests) and an
+updated `tests/test_systeminfo.nim`.
+
+Goal: show live per-core utilisation next to per-core frequency, each with a
+numeric readout, and a bar for the load.
+
+### Data source (verified on this machine)
+
+- `kern.cp_times` returns `hw.ncpu * CPUSTATES` C `long` values (8 bytes each
+  on amd64), CPU-major, state order `CP_USER, CP_NICE, CP_SYS, CP_INTR,
+  CP_IDLE` (`/usr/include/sys/resource.h`). 12 CPUs read back as 480 bytes.
+- Per-core busy fraction comes from two samples an interval apart:
+  `busy = 1 - idleDelta / totalDelta`.
+- `dev.cpu.N.freq` already supplies the current per-core MHz.
+
+### Data layer
+
+1. `sysctlread.nim`: add `sysctlRaw*(name): seq[byte]`, an untyped bulk read
+   for array-valued oids. The existing typed helpers stay unchanged.
+2. `cpu.nim`:
+   - Add `CpuStates = 5` / `CpuIdleState = 4` constants and a
+     `CpuLoadSampler*` object holding the previous per-core idle and total
+     tick counts plus a `primed` flag.
+   - Add `sampleCpuTimes(): seq[array[CpuStates, int64]]` decoding the raw
+     bytes into per-core tick arrays, validating `len == ncpu * CpuStates`.
+   - Add `sampleLoad(s: var CpuLoadSampler): seq[float]` returning the
+     per-core busy percentage since the previous call; the first call primes
+     the baseline and reports zeros.
+   - Replace `CpuInfo.coreFrequenciesMhz` with a per-core record
+     `CpuCore* = object` carrying `frequencyMhz*: int` and
+     `loadPercent*: float`, as `CpuInfo.cores*: seq[CpuCore]`.
+3. `systeminfo.nim`: `collectSystem*(sampler: var CpuLoadSampler)` threads the
+   sampler through so both frontends share one delta state.
+
+### Frontends
+
+- `gui.nim`: `AppState` keeps a `CpuLoadSampler` across the existing 2 s
+  `addGlobalTimeout` refresh. The CPU panel is a header row plus one row per pair
+  of cores (the left half of the cores first, then the right half): `cpuN` label,
+  the frequency as text (`formatMhz`), a load bar (`LevelBar`, 0..100) and the
+  load as text (`formatPercent`), repeated twice per row. Fixed-width columns so
+  the header and the numbers line up.
+- `tui.nim`: one line per core (now two cores per line, laid out as `coreCell`
+  pairs built from `coreHeaderCell`), reusing the existing `bar`.
+
+### Tests
+
+- `test_cpu.nim`: decode a synthetic `kern.cp_times` buffer (known byte
+  layout) and drive a delta through two hand-fed samples; live checks that
+  `cores.len == hw.ncpu` and every load is within 0..100.
+- `test_systeminfo.nim`: update for the sampler-aware `collectSystem`.
+
+### Edge cases
+
+- First refresh has no baseline: report 0% until the second tick.
+- CPUs may appear or disappear: reallocate when `ncpu` or the array length
+  changes.
+- Counter wrap: compute deltas on unsigned values and clamp to 0..100.
+
+## Network tab
+
+Status: implemented. A third GUI tab (`Network`) plus a matching TUI section show
+interfaces and their addresses, name servers and the default gateway,
+per-interface throughput with a diagram, and nearby wireless networks. The data
+sources below were checked on this machine before implementation.
+
+### Data sources (checked on this machine)
+
+- `getifaddrs(2)` (libc, `<ifaddrs.h>`) lists every interface with its name,
+  flags and addresses and, for the `AF_LINK` entry, a `struct if_data` pointer in
+  `ifa_data`. Verified here: `igc0` (AF_LINK `18:c0:4d:3a:fc:a3`, inet
+  `192.168.1.15`) and `lo0`. Nim's stdlib has no `ifaddrs` binding, so a small
+  raw module is needed (same pattern as `sysctl.nim` / `statfs.nim`).
+- `struct if_data` (`<net/if.h>`) carries `ifi_ibytes` / `ifi_obytes`,
+  `ifi_ipackets` / `ifi_opackets`, `ifi_baudrate` (link speed) and `ifi_mtu`.
+  Verified: `igc0` reported `baud=1000000000 ibytes=3005937701 obytes=189132114`.
+  Throughput is the delta between two samples, so it needs a sampler like
+  `CpuLoadSampler`.
+- Name servers and search domains: `/etc/resolv.conf` (`nameserver` / `search`
+  lines). Verified: `192.168.1.1`, `8.8.8.8`.
+- Default gateway: there is no libc accessor for the routing table; use
+  `/sbin/route -n get default` and read the `gateway:` / `interface:` lines
+  (read-only, base system). A native `sysctl(NET_RT_DUMP)` parser is a later
+  stretch goal.
+- Wireless: `net.wlan.devices` names the driver device (`rtwn0` here) and `wlanN`
+  clone interfaces appear in `getifaddrs`. Available networks come from
+  `ifconfig wlanN list scan`, which shows cached scan results without root
+  (`ifconfig wlanN scan` needs super-user, so it is not used). The current
+  association (`ssid`, `status`) comes from `ifconfig wlanN` / `list sta`. This
+  box has `rtwn0` but no `wlanN` interface yet, so the wireless panel must fall
+  back to "no wireless interface" and the scan parser is tested against a
+  synthetic sample.
+
+### Module layout
+
+- `src/bsdinfo/ifaddrs.nim` - raw `getifaddrs` / `freeifaddrs` and
+  `struct ifaddrs` / `struct if_data` FFI.
+- `src/bsdinfo/net.nim` - models plus `collectInterfaces`, `collectNameServers`,
+  `collectGateway`, `collectWlan`, `sampleRates`, `collectNetwork`; the pure
+  parsers `parseResolvConf`, `parseRouteGetDefault` and `parseIfconfigScan` are
+  exported for tests.
+- `systeminfo.nim` - `SystemInfo.net` and `collectSystem(cpuSampler, netSampler)`.
+
+### Models
+
+- `NetInterface`: name, mac, flags, up, loopback, mtu, baudrate, addresses,
+  rx/tx byte counters.
+- `IpAddress`: family (`inet` / `inet6`), address, netmask.
+- `InterfaceRate`: name, `rxBytesPerSec`, `txBytesPerSec`.
+- `WlanNetwork`: ssid, bssid, channel, rate, signal, caps.
+- `NetworkInfo`: interfaces, rates, nameServers, searchDomains, gateway,
+  gatewayInterface, wlanInterfaces, wlanNetworks.
+- `NetLoadSampler`: previous per-interface rx/tx counters plus a timestamp and a
+  `primed` flag (mirrors `CpuLoadSampler`).
+
+### Frontends
+
+- GUI: a third `Network` tab in the tab strip. Panels: interfaces (name, MAC,
+  addresses, link speed, up/down), gateway and name servers, per-interface
+  throughput (a bar per direction plus numbers, and a cairo `DrawingArea`
+  sparkline of the recent history kept in `AppState`), and wireless (associated
+  SSID, then scan results with signal and capabilities).
+- TUI: a `Network` section with interface lines, gateway and name servers,
+  per-interface `rx`/`tx` bars, and the wireless list. Sections are ordered CPU,
+  Graphics, Memory, Network, Filesystems, Storage Devices; the CPU section lists
+  two cores per row, like the GUI. The whole TUI is scrollable with the arrow
+  keys and Page Up/Down (`render` returns the total line count and the caller
+  clamps the offset).
+
+### Tests
+
+- `tests/test_net.nim`: live checks (at least one interface, at least one has an
+  address, name servers parse, the first rate sample is zero and later samples
+  are non-negative), plus parser tests with synthetic input for `resolv.conf`,
+  the `route -n get default` output and `ifconfig wlan0 list scan` output.
+
+### Edge cases
+
+- No wireless interface or no cached scan results: empty lists, GUI shows a
+  placeholder.
+- Interface set changes between samples (e.g. a `wlanN` clone is created):
+  re-init the sampler when the name set changes.
+- Counter reset or wrap: compute deltas on unsigned values and clamp negatives
+  to zero.
+- IPv6 link-local addresses carry a `%ifname` scope suffix; keep it as printed.
+- `route` or `ifconfig` missing or failing: best-effort empty values, as with
+  `pciconf` and `geom`.
+
+
+## GPU details
+
+Status: implemented. The Graphics panel shows per-GPU load, VRAM usage, driver
+and firmware identification, temperature/power/clocks, and a fan field that
+reads `n/a` because drm-kmod 3.54 exposes no fan reading. The data sources below
+were checked on this machine before implementation.
+
+### Data sources (checked on this machine, RX 6600 / amdgpu)
+
+The card is driven by `amdgpu.ko` + `drm.ko` (drm-kmod 3.54.0), attached as
+`drmn0` under `vgapci0`. Two independent sources exist:
+
+- **drm-kmod sysctls** under `sys.device.drmnN.*` (world-readable, no device
+  access): `gpu_busy_percent`, `mem_busy_percent`, `pp_dpm_sclk` / `mclk` /
+  `fclk` / `socclk` / `dcefclk` / `pcie`, `power_dpm_state`,
+  `power_dpm_force_performance_level`, `pp_features`, `pp_cur_state`,
+  `vbios_version` (`113-2447LHM-WD1`), and a full `fw_version.*` set (SMC
+  `0x003b3200`, SOS, ASD, PFP, ME, MEC, RLC, SDMA, VCN, ...).
+- **`DRM_IOCTL_AMDGPU_INFO`** on `/dev/dri/renderD128` (needs `video` group
+  membership; this user is in `video`). Verified with a C probe: `MEMORY` gives
+  `vram=8573157376` (~7.98 GiB), `cpu_accessible=8528154624`, `gtt=693637120`;
+  `VRAM_USAGE` gives `used=693637120` (~661 MiB); `SENSOR` gives `temp=50000`
+  (millidegrees C), `load` (percent), `avg_power`, `stable_sclk=1950`,
+  `stable_mclk=676`; `FW_VERSION` for SMC matched the sysctl. The ioctl ABI is
+  defined by `struct drm_amdgpu_info` (32 bytes) and `DRM_IOCTL_AMDGPU_INFO =
+  0x80206445`.
+  Note: `/dev/dri/card0` returns `EPERM` for these ioctls while a display server
+  holds it; `/dev/dri/renderD128` is the node to use.
+
+- **Load**: `AMDGPU_INFO_SENSOR_GPU_LOAD` (ioctl) or `gpu_busy_percent` (sysctl);
+  memory-controller load `mem_busy_percent`.
+- **Memory usage**: `AMDGPU_INFO_VRAM_USAGE` (used) + `AMDGPU_INFO_MEMORY`
+  (VRAM total, CPU-accessible VRAM, GTT total).
+- **Driver info**: `vbios_version`, `fw_version.*`, `power_dpm_state`,
+  `pp_features`, the module list (`amdgpu.ko`, `drm.ko`) and the version line
+  `Initialized amdgpu 3.54.0 ...` in `kern.msgbuf`.
+- **Fan speed**: **not exposed**. `amdgpu_drm.h` has no `FANSPEED` sensor, and
+  drm-kmod 3.54 registers no hwmon/fan sysctl on this ASIC (all 48
+  `sys.device.drmn0.*` keys were enumerated). Plan: model the field, render
+  `n/a` when unset, and leave a hook for a future hwmon/`fan1_input` interface.
+- Extra metrics that come for free and are worth showing: GPU temperature,
+  average power and the sclk/mclk clocks (skip `SENSOR_GFX_SCLK`, which returned
+  a useless `1`; use `stable_sclk` or the `pp_dpm_sclk` sysctl).
+
+### Module layout
+
+- `src/bsdinfo/amdgpu_drm.nim` (raw FFI): the `DRM_IOCTL_AMDGPU_INFO` request
+  number, the query and sensor constants, the 32-byte `drm_amdgpu_info` request
+  struct and the result structs (`drm_amdgpu_info_vram_gtt`,
+  `drm_amdgpu_info_vram_usage`). The constants are hard-coded from the stable DRM
+  ABI (documented in `libdrm/amdgpu_drm.h`) so the build keeps needing only libc;
+  `ioctl` itself is a libc call.
+- `src/bsdinfo/gpu.nim`: extend `GpuInfo` with `GpuMetrics` and `GpuDriverInfo`,
+  add `collectGpuMetrics` (ioctl, best-effort when the render node is missing)
+  and `collectGpuDriverInfo` (sysctls + `kern.msgbuf`), and a pure
+  `parseAmdgpuVersion` parser for the msgbuf line. The `drmnN` unit is found by
+  probing `sys.device.drmnN.*` with `hasSysctl`, with `dev.amdgpu.N.*` as a
+  fallback for older drm-kmod.
+
+### Frontends
+
+- GUI Graphics panel: per GPU, a load row (`LevelBar` + percent), a memory row
+  (VRAM used/total with a bar, plus GTT), a temperature/power/clocks line, a
+  fan line showing `n/a`, and driver-info lines (vbios, SMC firmware,
+  power state).
+- TUI Graphics section: the same values as extra lines.
+
+### Tests
+
+- `tests/test_gpu.nim`: `parseAmdgpuVersion` on a synthetic msgbuf; live checks
+  that when a DRM device is found `vramTotal > 0`, `vramUsed <= vramTotal` and
+  `temperatureC` is within 0..150 (or 0 when unavailable); the ioctl path
+  degrades to zeroed metrics when `/dev/dri/renderD128` cannot be opened.
+- `tests/test_format.nim`: keep the byte/percent formatters reused for memory.
+
+### Edge cases
+
+- No `amdgpu`/DRM device (other vendor, or the module is not loaded): the panel
+  keeps the existing `pciconf` information and omits the metrics.
+- Render node missing or permission denied (user not in `video`): fall back to
+  the sysctl-only subset (load, clocks, driver info).
+- More than one GPU: `drmnN` is matched per device; the ioctl path queries the
+  first render node and is skipped with more than one GPU.
+- Sensor unsupported on the ASIC (`GPU_INPUT_POWER` returned `EINVAL` here):
+  treat `EINVAL`/`EPERM` as "unavailable", leave the field zero.
 
 
 ### Build and run

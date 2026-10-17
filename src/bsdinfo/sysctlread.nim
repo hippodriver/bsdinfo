@@ -62,6 +62,16 @@ proc sysctlU64*(name: string): uint64 =
     raiseSysctl(name, errno)
   result = value
 
+proc sysctlRaw*(name: string): seq[byte] =
+  ## Read the raw bytes of a sysctl value; used for array-valued oids.
+  var len = sizeOfSysctl(name)
+  if len == 0:
+    return @[]
+  result = newSeq[byte](len)
+  if sysctlbyname(name.cstring, result[0].addr, addr len, nil, 0) != 0:
+    raiseSysctl(name, errno)
+  result.setLen(len)
+
 proc sysctlStringOrDefault*(name: string; default = ""): string =
   ## Optional lookup: return `default` when `name` is unreadable.
   try:

@@ -9,13 +9,20 @@ dependencies.
 ## Features
 
 - Operating system, hostname and architecture identification
-- CPU model, logical CPU count, base clock and per-core frequencies
+- CPU model, logical CPU count, base clock, and per-core frequency and load
+  (cores listed two per row in both frontends, under `core` / `frequency` /
+  `load` column headers)
 - Physical memory usage (total, used, free, active, inactive, wired)
 - Mounted filesystems with usage bars and physical storage devices
-- Display controllers (GPU) detected via PCI configuration
+- Network interfaces with their addresses and MAC, name servers, the default
+  gateway, per-interface throughput and nearby wireless networks
+- Display controllers (GPU) from PCI configuration, plus per-GPU load, VRAM
+  usage and driver/firmware details (fan speed is not exposed by drm-kmod 3.54,
+  so it is shown as `n/a`)
 - Two frontends over one shared data model:
-  - a GTK4 dashboard (owlkettle) with a cairo arc gauge, auto-refreshing
-  - a terminal dashboard (illwill) with bars, quitting on `q`
+  - a GTK4 dashboard (owlkettle) with a cairo arc gauge, a throughput
+    sparkline and tabs (`System`, `Storage`, `Network`), auto-refreshing
+  - a terminal dashboard (illwill) with bars and scrollback, quitting on `q`
 - XFCE application-menu integration via desktop entries
 
 ## Requirements
@@ -57,6 +64,7 @@ nim c -r tests/test_memory.nim
 nim c -r tests/test_osinfo.nim
 nim c -r tests/test_disk.nim
 nim c -r tests/test_gpu.nim
+nim c -r tests/test_net.nim
 nim c -r tests/test_systeminfo.nim
 nim c -r tests/test_format.nim
 ```
@@ -71,11 +79,14 @@ plus a `collectX` proc; `collectSystem` aggregates them into a `SystemInfo`.
 | `src/bsdinfo/sysctl.nim` | Raw libc `sysctl` / `sysctlbyname` FFI |
 | `src/bsdinfo/sysctlread.nim` | Typed, error-reporting sysctl accessors |
 | `src/bsdinfo/statfs.nim` | Raw `getfsstat` / `struct statfs` FFI |
+| `src/bsdinfo/ifaddrs.nim` | Raw `getifaddrs` / `struct if_data` FFI |
+| `src/bsdinfo/amdgpu_drm.nim` | Raw `DRM_IOCTL_AMDGPU_INFO` FFI |
 | `src/bsdinfo/cpu.nim` | `CpuInfo` + `collectCpu` |
 | `src/bsdinfo/memory.nim` | `MemoryInfo` + `collectMemory` |
 | `src/bsdinfo/osinfo.nim` | `OsInfo` + `collectOs` |
 | `src/bsdinfo/disk.nim` | `DiskInfo` + `collectDisks` |
 | `src/bsdinfo/gpu.nim` | `GpuInfo` + `collectGpus` |
+| `src/bsdinfo/net.nim` | `NetworkInfo` + `collectNetwork` |
 | `src/bsdinfo/systeminfo.nim` | `SystemInfo` + `collectSystem` |
 | `src/bsdinfo/format.nim` | Human-readable byte / MHz / percent formatting |
 | `src/bsdinfo/gui.nim` | owlkettle GTK4 dashboard |
@@ -91,7 +102,14 @@ plus a `collectX` proc; `collectSystem` aggregates them into a `SystemInfo`.
 | OS | `kern.ostype`, `kern.osrelease`, `kern.version`, `kern.hostname`, `uname(2)` |
 | Filesystems | `getfsstat(2)` |
 | Storage devices | `geom disk list` |
-| GPU | `pciconf -lv` |
+| GPU devices | `pciconf -lv` |
+| GPU load / VRAM / clocks | `sys.device.drmnN.*`, `DRM_IOCTL_AMDGPU_INFO` |
+| GPU driver / firmware | `vbios_version`, `fw_version.*`, `kern.msgbuf` |
+| Network interfaces, IPs, MAC | `getifaddrs(2)` |
+| Interface throughput | `struct if_data` counters, delta between samples |
+| Name servers | `/etc/resolv.conf` |
+| Default gateway | `route -n get default` |
+| Wireless networks | `ifconfig <wlan> list scan` |
 
 See `design.md` for the full plan and implementation notes.
 
